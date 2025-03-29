@@ -455,54 +455,56 @@ export default class Youtube2Obsidian extends Plugin {
 	}
 
 	private updateNote(editor: Editor, summaries: Map<string, { title: string, summary: string }>) {
-		const content = editor.getValue();
-		const lines = content.split('\n');
+		let content = editor.getValue();
 		
-		// Find existing YouTube Transcripts section
-		let sectionStart = -1;
-		for (let i = 0; i < lines.length; i++) {
-			if (lines[i].trim() === '## YouTube Transcripts') {
-				sectionStart = i;
-				break;
-			}
-		}
+		// Process each video
+		for (const [videoId, data] of summaries) {
+			// Create regex patterns for different URL formats
+			const patterns = [
+				new RegExp(`https?://(?:www\\.)?youtube\\.com/watch\\?v=${videoId}[^\\s]*`, 'g'),
+				new RegExp(`https?://(?:www\\.)?youtu\\.be/${videoId}[^\\s]*`, 'g'),
+				new RegExp(`https?://(?:www\\.)?youtube\\.com/embed/${videoId}[^\\s]*`, 'g')
+			];
 
-		// Get existing video IDs in the section
-		const existingVideoIds = new Set<string>();
-		if (sectionStart !== -1) {
-			const sectionContent = lines.slice(sectionStart).join('\n');
-			for (const [videoId, data] of summaries) {
-				if (sectionContent.includes(`### ${data.title}`)) {
-					existingVideoIds.add(videoId);
+			// Find all matches of the current video URL
+			let urlFound = false;
+			for (const pattern of patterns) {
+				const matches = content.matchAll(pattern);
+				for (const match of matches) {
+					urlFound = true;
+					const fullUrl = match[0];
+					
+					// Create the new content block with header and empty-text link
+					const newBlock = `\n## ${data.title}\n[](${fullUrl})\n\n${data.summary}\n`;
+					
+					// Remove the URL from the content
+					content = content.replace(fullUrl, '');
+					
+					// Add the new block at the end of the content
+					content = content.trim() + newBlock;
 				}
 			}
-		}
 
-		// Prepare new summaries
-		let newContent = '';
-		if (sectionStart === -1) {
-			// Create new section
-			newContent = '\n\n## YouTube Transcripts\n\n';
-		} else {
-			// Append to existing section
-			newContent = '\n';
-		}
-
-		// Add new summaries
-		for (const [videoId, data] of summaries) {
-			if (!existingVideoIds.has(videoId)) {
-				newContent += `### ${data.title}\n\n${data.summary}\n\n`;
+			// If no URL was found but we have a summary, still add it
+			if (!urlFound) {
+				const newBlock = `\n## ${data.title}\n[](https://youtube.com/watch?v=${videoId})\n\n${data.summary}\n`;
+				content = content.trim() + newBlock;
 			}
 		}
 
-		// Insert content
-		if (sectionStart === -1) {
-			// Add at the end of the note
-			editor.replaceRange(newContent, { line: lines.length, ch: 0 });
-		} else {
-			// Add after the section header
-			editor.replaceRange(newContent, { line: sectionStart + 1, ch: 0 });
-		}
+		// Clean up any empty lines that might have been left behind
+		content = content
+			.split('\n')
+			.filter((line, index, array) => {
+				// Keep lines that have content or are part of meaningful spacing
+				return line.trim() !== '' || 
+					(index > 0 && array[index - 1].trim() !== '' && 
+					index < array.length - 1 && array[index + 1].trim() !== '');
+			})
+			.join('\n');
+
+		// Update the editor content
+		editor.setValue(content);
 	}
 
 	onunload() {
