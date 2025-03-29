@@ -1,14 +1,26 @@
-# vscode
-.vscode 
+# Node modules
+node_modules/
 
-# Intellij
+# Build output
+main.js
+*.js.map
+
+# Environment variables
+.env
+
+# IDE files
+.idea/
+.vscode/
 *.iml
-.idea
 
-# npm
-node_modules
+# OS files
+.DS_Store
+Thumbs.db
 
-# Don't include the compiled main.js file in the repo.
+# Obsidian
+.obsidian/
+
+# Exclude the compiled main.js file in the repo.
 # They should be uploaded to GitHub releases instead.
 main.js
 
@@ -17,6 +29,3 @@ main.js
 
 # obsidian
 data.json
-
-# Exclude macOS Finder (System Explorer) View States
-.DS_Store
