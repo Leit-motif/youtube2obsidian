@@ -4,10 +4,16 @@ An Obsidian plugin that fetches YouTube video transcripts and creates AI-powered
 
 ## Features
 
+- Quick access via YouTube ribbon icon in the left sidebar
 - Automatically detects YouTube URLs in your notes
-- Fetches English transcripts for all detected videos
+- Fetches English transcripts for all detected videos (prioritizes US English)
 - Generates concise summaries using OpenAI's GPT models
 - Organizes summaries under a "YouTube Transcripts" section
+- Advanced transcript cleaning:
+  - Proper handling of HTML entities
+  - Smart handling of acronyms and punctuation
+  - Removal of timestamps and filler words
+  - Improved sentence structure and readability
 - Customizable summarization prompt
 - Supports multiple YouTube URL formats (youtube.com/watch, youtu.be, youtube.com/embed)
 
@@ -20,13 +26,22 @@ An Obsidian plugin that fetches YouTube video transcripts and creates AI-powered
 
 ## Usage
 
-1. Add YouTube URLs to your note
-2. Open the command palette (Ctrl/Cmd + P)
-3. Search for "Summarize YouTube Transcripts"
-4. The plugin will:
-   - Fetch transcripts for all videos
-   - Generate summaries using OpenAI
-   - Add summaries under a "YouTube Transcripts" section
+There are two ways to use the plugin:
+
+1. Using the Ribbon Icon:
+   - Click the YouTube icon in the left sidebar
+   - The plugin will process all YouTube URLs in the current note
+
+2. Using the Command Palette:
+   - Open the command palette (Ctrl/Cmd + P)
+   - Search for "Summarize YouTube Transcripts"
+   - Select the command to process all URLs
+
+The plugin will:
+- Fetch transcripts for all videos
+- Clean and format the transcripts for better readability
+- Generate summaries using OpenAI
+- Add summaries under a "YouTube Transcripts" section
 
 ## Settings
 
@@ -34,6 +49,7 @@ An Obsidian plugin that fetches YouTube video transcripts and creates AI-powered
 - **Summary Prompt**: Customize how the AI should summarize the transcripts
 - **Max Tokens**: Control the length of generated summaries
 - **Model**: Choose between GPT-3.5 Turbo and GPT-4
+- **CORS Proxy**: Configure the CORS proxy URL for fetching transcripts (default: corsproxy.io)
 
 ## Development
 
@@ -47,6 +63,15 @@ npm install
 # Build the plugin
 npm run build
 ```
+
+## Troubleshooting
+
+If you encounter issues:
+
+1. **No Transcripts Available**: Make sure the video has closed captions enabled
+2. **API Key Error**: Verify your OpenAI API key in the plugin settings
+3. **CORS Issues**: Try changing the CORS proxy URL in settings
+4. **Empty Summaries**: Check the console (Ctrl/Cmd + Shift + I) for detailed logs
 
 ## License
 
