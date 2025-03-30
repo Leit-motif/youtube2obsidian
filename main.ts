@@ -272,17 +272,21 @@ export default class Youtube2Obsidian extends Plugin {
 		try {
 			// Remove any trailing = and timestamp parameters
 			const cleanVideoId = videoId.replace(/[&?]t=.*$/, '').replace(/=+$/, '');
+			console.log('Getting title for video ID:', cleanVideoId);
 			
 			// Try fetching directly from YouTube first
 			const youtubeResponse = await fetch(`https://www.youtube.com/oembed?url=http://www.youtube.com/watch?v=${cleanVideoId}&format=json`);
 			if (youtubeResponse.ok) {
 				const data = await youtubeResponse.json();
+				console.log('Got YouTube title:', data.title);
 				return data.title || `Video ${cleanVideoId}`;
 			}
 			
 			// Fallback to noembed if YouTube fails
+			console.log('YouTube oembed failed, trying noembed...');
 			const response = await fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${cleanVideoId}`);
 			const data = await response.json();
+			console.log('Got noembed title:', data.title);
 			return data.title || `Video ${cleanVideoId}`;
 		} catch (error) {
 			console.error('Error fetching video title:', error);
@@ -303,6 +307,7 @@ export default class Youtube2Obsidian extends Plugin {
 				
 				// First try to get the video title
 				const title = await this.getVideoTitle(cleanVideoId);
+				console.log('Retrieved title for video:', title);
 				
 				// Fetch the video page to get player data
 				console.log('Fetching video page...');
@@ -430,31 +435,167 @@ export default class Youtube2Obsidian extends Plugin {
 			const prompt = `${this.settings.summaryPrompt}\n\nTranscript:\n${transcript}`;
 			console.log('Sending prompt to OpenAI:', prompt);
 
-			const completion = await this.openai.chat.completions.create({
+			try {
+				const completion = await this.openai.chat.completions.create({
+					model: this.settings.model,
+					messages: [
+						{
+							role: "system",
+							content: "You are a helpful assistant that creates concise summaries of video transcripts."
+						},
+						{
+							role: "user",
+							content: prompt
+						}
+					],
+					max_tokens: this.settings.maxTokens,
+					temperature: 0.7,
+				});
+
+				console.log('OpenAI response:', completion.choices[0]?.message?.content);
+				const summary = completion.choices[0]?.message?.content || 'No summary available';
+				if (summary === 'No summary available' || summary.includes("Please provide the video transcript")) {
+					throw new Error('Failed to generate summary: Invalid response from OpenAI');
+				}
+				return summary;
+
+			} catch (error) {
+				if (error instanceof Error && 
+					typeof error.message === 'string' && 
+					error.message.includes('Request too large')) {
+					// Extract requested tokens from error message
+					const match = error.message.match(/Requested (\d+)/);
+					const requestedTokens = match ? parseInt(match[1]) : undefined;
+					console.log('Token limit exceeded, using recursive summarization with', requestedTokens, 'tokens');
+					console.log('Starting recursive summarization...');
+					return await this.recursiveSummarize(transcript, requestedTokens);
+				}
+				throw error;
+			}
+		} catch (error) {
+			console.error('Error in summarizeTranscript:', error);
+			throw error instanceof Error ? error : new Error('Unknown error in summarizeTranscript');
+		}
+	}
+
+	private async recursiveSummarize(transcript: string, requestedTokens?: number): Promise<string> {
+		if (!this.openai) {
+			throw new Error('OpenAI client not initialized');
+		}
+
+		try {
+			// Calculate optimal chunk size based on the token error if available
+			// GPT-3.5-turbo has a 16k token limit, so we'll aim for ~12k tokens per chunk to be safe
+			const tokenLimit = 12000;
+			// Estimate tokens (rough approximation: 1 token ≈ 4 characters)
+			const estimatedTokens = transcript.length / 4;
+			const numChunks = Math.max(Math.ceil(estimatedTokens / tokenLimit), requestedTokens ? Math.ceil(requestedTokens / tokenLimit) : 1);
+			const approximateChunkSize = Math.floor(transcript.length / numChunks);
+
+			console.log(`Recursive summarization: Splitting into ${numChunks} chunks of ~${approximateChunkSize} characters each`);
+
+			const chunks: string[] = [];
+			let currentPosition = 0;
+
+			// Split into chunks at sentence boundaries
+			while (currentPosition < transcript.length) {
+				let endPosition = Math.min(currentPosition + approximateChunkSize, transcript.length);
+				
+				// Find the last sentence boundary (period, exclamation mark, or question mark followed by space)
+				if (endPosition < transcript.length) {
+					const searchText = transcript.slice(endPosition - 100, endPosition + 100);
+					const lastSentenceMatch = searchText.match(/[.!?]\s+/g);
+					if (lastSentenceMatch) {
+						const lastMatch = lastSentenceMatch[lastSentenceMatch.length - 1];
+						const matchIndex = searchText.lastIndexOf(lastMatch);
+						endPosition = endPosition - 100 + matchIndex + lastMatch.length;
+					}
+				}
+
+				chunks.push(transcript.slice(currentPosition, endPosition).trim());
+				currentPosition = endPosition;
+			}
+
+			console.log(`Created ${chunks.length} chunks for processing`);
+
+			// Store openai reference
+			const openai = this.openai;
+			const summaries: string[] = [];
+
+			// Process chunks with delay between each to avoid rate limits
+			for (let i = 0; i < chunks.length; i++) {
+				try {
+					console.log(`Processing chunk ${i + 1} of ${chunks.length}`);
+					// Add delay between chunks to respect rate limits
+					if (i > 0) {
+						await new Promise(resolve => setTimeout(resolve, 2000));
+					}
+
+					const completion = await openai.chat.completions.create({
+						model: "gpt-3.5-turbo-16k", // Use 16k version for better handling of long chunks
+						messages: [
+							{
+								role: "system",
+								content: "Create a very brief summary of this transcript segment, focusing only on the key points."
+							},
+							{
+								role: "user",
+								content: chunks[i]
+							}
+						],
+						max_tokens: Math.min(2000, Math.floor(this.settings.maxTokens / 2)),
+						temperature: 0.7,
+					});
+
+					const summary = completion.choices[0]?.message?.content || '';
+					if (summary) {
+						console.log(`Successfully summarized chunk ${i + 1}`);
+						summaries.push(summary);
+					}
+				} catch (error) {
+					console.error(`Error summarizing chunk ${i + 1}, skipping:`, error);
+					// Continue with other chunks even if one fails
+					continue;
+				}
+			}
+
+			// If we have no summaries, throw error
+			if (summaries.length === 0) {
+				throw new Error('Failed to generate any chunk summaries');
+			}
+
+			console.log(`Successfully generated ${summaries.length} chunk summaries, combining for final summary...`);
+
+			// Combine summaries in smaller groups if needed
+			const combinedSummary = summaries.join('\n\n');
+			
+			// Final summary using GPT-4
+			const completion = await openai.chat.completions.create({
 				model: this.settings.model,
 				messages: [
 					{
 						role: "system",
-						content: "You are a helpful assistant that creates concise summaries of video transcripts."
+						content: "Create a final, cohesive bullet-point summary from these segment summaries. Focus on the main ideas and ensure the summary flows logically."
 					},
 					{
 						role: "user",
-						content: prompt
+						content: `${this.settings.summaryPrompt}\n\nSegment Summaries:\n${combinedSummary}`
 					}
 				],
 				max_tokens: this.settings.maxTokens,
 				temperature: 0.7,
 			});
 
-			console.log('OpenAI response:', completion.choices[0]?.message?.content);
-			const summary = completion.choices[0]?.message?.content || 'No summary available';
-			if (summary === 'No summary available' || summary.includes("Please provide the video transcript")) {
-				throw new Error('Failed to generate summary: Invalid response from OpenAI');
+			const finalSummary = completion.choices[0]?.message?.content || 'Failed to generate summary';
+			if (finalSummary === 'Failed to generate summary') {
+				throw new Error('Failed to generate final summary');
 			}
-			return summary;
+
+			console.log('Successfully generated final combined summary');
+			return finalSummary;
 		} catch (error) {
-			console.error('Error in summarizeTranscript:', error);
-			throw new Error(`Failed to generate summary: ${error.message}`);
+			console.error('Error in recursive summarization:', error);
+			throw error instanceof Error ? error : new Error('Unknown error in recursive summarization');
 		}
 	}
 
@@ -521,9 +662,9 @@ ${transcript.split(/[.!?]\s+/)  // Split into sentences
 		for (const [videoId, data] of summaries) {
 			// Create regex patterns for different URL formats
 			const patterns = [
-				new RegExp(`https?://(www\\.)?youtube\\.com/watch\\?v=${videoId}[^\\s]*`, 'g'),
-				new RegExp(`https?://(www\\.)?youtu\\.be/${videoId}[^\\s]*`, 'g'),
-				new RegExp(`https?://(www\\.)?youtube\\.com/embed/${videoId}[^\\s]*`, 'g')
+				new RegExp(`https?:\\/\\/(www\\.)?youtube\\.com\\/watch\\?v=${videoId}([^\\s]*)`, 'g'),
+				new RegExp(`https?:\\/\\/(www\\.)?youtu\\.be\\/${videoId}([^\\s]*)`, 'g'),
+				new RegExp(`https?:\\/\\/(www\\.)?youtube\\.com\\/embed\\/${videoId}([^\\s]*)`, 'g')
 			];
 
 			// Find all matches of the current video URL
@@ -538,22 +679,22 @@ ${transcript.split(/[.!?]\s+/)  // Split into sentences
 					const transcriptPath = await this.createTranscriptNote(data.title, data.transcript, fullUrl);
 					const transcriptLink = transcriptPath.replace('.md', '');
 					
-					// Create the new content block with header, summary, and transcript link at the bottom
-					const newBlock = `\n## ${data.title}\n\n${data.summary}\n\n[[${transcriptLink}|Full Transcript]]\n`;
+					// Create the new content block with header using video title, empty markdown link to video, summary, and transcript link at the bottom
+					const newBlock = `\n## ${data.title}\n[ ](${fullUrl})\n\n${data.summary}\n\n[[${transcriptLink}|Full Transcript]]\n`;
 					
-					// Remove the URL from the content
-					content = content.replace(fullUrl, '');
-					
-					// Add the new block at the end of the content
-					content = content.trim() + newBlock;
+					// Replace the URL with the new block instead of removing it
+					if (match.index !== undefined) {
+						content = content.substring(0, match.index) + newBlock + content.substring(match.index + fullUrl.length);
+					}
 				}
 			}
 
-			// If no URL was found but we have a summary, still add it
+			// If no URL was found but we have a summary, add it at the end
 			if (!urlFound) {
-				const transcriptPath = await this.createTranscriptNote(data.title, data.transcript, `https://youtube.com/watch?v=${videoId}`);
+				const videoUrl = `https://youtube.com/watch?v=${videoId}`;
+				const transcriptPath = await this.createTranscriptNote(data.title, data.transcript, videoUrl);
 				const transcriptLink = transcriptPath.replace('.md', '');
-				const newBlock = `\n## ${data.title}\n\n${data.summary}\n\n[[${transcriptLink}|Full Transcript]]\n`;
+				const newBlock = `\n## ${data.title}\n[ ](${videoUrl})\n\n${data.summary}\n\n[[${transcriptLink}|Full Transcript]]\n`;
 				content = content.trim() + newBlock;
 			}
 		}
