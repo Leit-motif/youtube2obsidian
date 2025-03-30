@@ -465,8 +465,14 @@ export default class Youtube2Obsidian extends Plugin {
 		// Create the transcript note content with metadata and formatting
 		const content = `---
 title: "${title}"
-url: ${videoUrl}
-date_processed: ${date}
+url: "${videoUrl}"
+date_created: ${date}
+type: youtube_transcript
+tags:
+  - youtube
+  - transcript
+aliases:
+  - "${title}"
 ---
 
 # ${title}
@@ -490,7 +496,20 @@ ${transcript.split(/[.!?]\s+/)  // Split into sentences
 
 		// Create or update the transcript note
 		const filePath = `${folderPath}/${sanitizedTitle}.md`;
-		await this.app.vault.create(filePath, content);
+		try {
+			// Check if file exists
+			const exists = await this.app.vault.adapter.exists(filePath);
+			if (exists) {
+				// Update existing file
+				await this.app.vault.adapter.write(filePath, content);
+			} else {
+				// Create new file
+				await this.app.vault.create(filePath, content);
+			}
+		} catch (error) {
+			console.error(`Error creating/updating transcript file: ${error}`);
+			// Return the path anyway so the link can be created
+		}
 		
 		return filePath;
 	}
