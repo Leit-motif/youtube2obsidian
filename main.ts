@@ -1,5 +1,6 @@
 import { App, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFolder } from 'obsidian';
 import OpenAI from 'openai';
+import { fetchTranscript } from 'youtube-transcript-plus';
 
 interface Youtube2ObsidianSettings {
 	openAIApiKey: string;
@@ -108,19 +109,9 @@ interface TranscriptItem {
 	offset: number;
 }
 
-interface CaptionTrack {
-	baseUrl: string;
-	languageCode: string;
-	kind?: string;
-	name?: {
-		simpleText: string;
-	};
-}
-
 export default class Youtube2Obsidian extends Plugin {
 	settings: Youtube2ObsidianSettings;
 	openai: OpenAI | undefined;
-	originalFetch: typeof fetch;
 
 	async onload() {
 		await this.loadSettings();
@@ -144,78 +135,6 @@ export default class Youtube2Obsidian extends Plugin {
 				}
 			}
 		);
-
-		// Override global fetch for youtube-transcript
-		this.originalFetch = window.fetch.bind(window);
-		const proxiedFetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-			// If it's a caption request, bypass the proxy and add required headers
-			if (typeof input === 'string' && input.includes('/api/timedtext')) {
-				const captionsInit = {
-					...init,
-					headers: {
-						...init?.headers,
-						'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-						'Accept-Language': 'en-US,en;q=0.9',
-						'Origin': 'https://www.youtube.com',
-						'Referer': 'https://www.youtube.com/',
-						'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-					}
-				};
-				console.log('Direct caption request:', {
-					url: input,
-					headers: captionsInit.headers
-				});
-				return this.originalFetch(input, captionsInit);
-			}
-
-			if (typeof input === 'string' && (input.includes('youtube.com') || input.includes('noembed.com'))) {
-				const proxyUrl = this.settings.corsProxy + encodeURIComponent(input);
-				console.log('Proxying request:', {
-					original: input,
-					proxied: proxyUrl,
-					headers: init?.headers
-				});
-				
-				// Add required headers for YouTube requests
-				const newInit = {
-					...init,
-					headers: {
-						...init?.headers,
-						'Origin': 'https://www.youtube.com',
-						'Referer': 'https://www.youtube.com/',
-						'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-						'Accept-Language': 'en-US,en;q=0.9',
-						'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-					}
-				};
-				
-				const response = await this.originalFetch(proxyUrl, newInit);
-				const headerObj: Record<string, string> = {};
-				response.headers.forEach((value, key) => {
-					headerObj[key] = value;
-				});
-				
-				console.log('Proxy response:', {
-					status: response.status,
-					statusText: response.statusText,
-					headers: headerObj
-				});
-				
-				// Log response body for debugging
-				const clonedResponse = response.clone();
-				try {
-					const text = await clonedResponse.text();
-					console.log('Response body:', text);
-				} catch (e) {
-					console.log('Could not log response body:', e);
-				}
-				
-				return response;
-			}
-			return this.originalFetch(input, init);
-		};
-
-		window.fetch = proxiedFetch.bind(window);
 
 		this.addCommand({
 			id: 'summarize-youtube-transcripts',
@@ -300,101 +219,40 @@ export default class Youtube2Obsidian extends Plugin {
 		for (const videoId of videoIds) {
 			try {
 				console.log(`Processing video ${videoId}...`);
-				
+
 				// Clean the video ID by removing timestamp and other parameters
 				const cleanVideoId = videoId.replace(/[&?]t=.*$/, '').replace(/=+$/, '');
 				console.log(`Using cleaned video ID: ${cleanVideoId}`);
-				
+
 				// First try to get the video title
 				const title = await this.getVideoTitle(cleanVideoId);
 				console.log('Retrieved title for video:', title);
 				
-				// Fetch the video page to get player data
-				console.log('Fetching video page...');
-				const videoUrl = `https://www.youtube.com/watch?v=${cleanVideoId}`;
-				const videoPageResponse = await fetch(videoUrl);
-				const videoPageBody = await videoPageResponse.text();
+				const customFetch = async (url: string) => {
+					const proxyUrl = this.settings.corsProxy + encodeURIComponent(url);
+					console.log('Proxying request via custom fetch:', {
+						original: url,
+						proxied: proxyUrl,
+					});
+				
+					const response = await fetch(proxyUrl, {
+						headers: {
+							'Origin': 'https://www.youtube.com',
+							'Referer': 'https://www.youtube.com/',
+							'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+							'Accept-Language': 'en-US,en;q=0.9',
+							'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+						}
+					});
+					return response;
+				};
 
-				// Extract player data
-				const playerDataMatch = videoPageBody.match(/var ytInitialPlayerResponse = ({.+?});/);
-				if (!playerDataMatch) {
-					throw new Error('Could not find player data');
-				}
-
-				// Parse player data
-				const playerData = JSON.parse(playerDataMatch[1]);
-				console.log('Successfully extracted player data');
-
-				// Get caption tracks
-				const captionTracks: CaptionTrack[] = playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-				if (!captionTracks.length) {
-					throw new Error('No caption tracks available');
-				}
-
-				console.log('Available caption tracks:', captionTracks.map(track => ({
-					languageCode: track.languageCode,
-					kind: track.kind,
-					name: track.name,
-					baseUrl: track.baseUrl
-				})));
-
-				// Try to find English captions, prioritizing US English
-				const captionTrack = captionTracks.find(track => track.languageCode === 'en-US') ||
-									captionTracks.find(track => track.languageCode === 'en') ||
-									captionTracks[0];
-
-				if (!captionTrack) {
-					throw new Error('No suitable caption track found');
-				}
-
-				console.log('Selected caption track:', {
-					languageCode: captionTrack.languageCode,
-					kind: captionTrack.kind,
-					name: captionTrack.name,
-					baseUrl: captionTrack.baseUrl
+				// Fetch transcript using the library
+				const transcriptItems: TranscriptItem[] = await fetchTranscript(cleanVideoId, {
+					lang: 'en',
+					videoFetch: ({ url }) => customFetch(url),
+					transcriptFetch: ({ url }) => customFetch(url)
 				});
-
-				// Use the exact baseUrl from the track
-				const captionsUrl = captionTrack.baseUrl;
-				console.log('Fetching captions from:', captionsUrl);
-
-				// Add required headers for the captions request
-				const captionsResponse = await fetch(captionsUrl, {
-					headers: {
-						'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-						'Accept-Language': 'en-US,en;q=0.9',
-						'Origin': 'https://www.youtube.com',
-						'Referer': 'https://www.youtube.com/',
-						'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-					}
-				});
-
-				if (!captionsResponse.ok) {
-					throw new Error(`Failed to fetch captions: ${captionsResponse.status} ${captionsResponse.statusText}`);
-				}
-
-				const captionsXML = await captionsResponse.text();
-				console.log('Captions XML (first 500 chars):', captionsXML.substring(0, 500));
-
-				if (!captionsXML.trim()) {
-					throw new Error('Received empty response from captions API');
-				}
-
-				// Parse XML
-				const parser = new DOMParser();
-				const xmlDoc = parser.parseFromString(captionsXML, 'text/xml');
-				const textElements = xmlDoc.getElementsByTagName('text');
-
-				if (!textElements.length) {
-					throw new Error('No transcript elements found in XML');
-				}
-
-				// Convert to transcript items
-				const transcriptItems: TranscriptItem[] = Array.from(textElements).map(element => ({
-					text: decodeHtmlEntities(element.textContent || ''),
-					duration: parseFloat(element.getAttribute('dur') || '0') * 1000,
-					offset: parseFloat(element.getAttribute('start') || '0') * 1000
-				}));
 
 				console.log(`Got transcript for "${title}" with ${transcriptItems.length} items`);
 				
@@ -415,9 +273,10 @@ export default class Youtube2Obsidian extends Plugin {
 				});
 			} catch (error) {
 				console.error(`Error processing video ${videoId}:`, error);
+				const errorMessage = `Error fetching transcript: ${error instanceof Error ? error.message : 'Unknown error'}`;
 				results.set(videoId, {
 					title: await this.getVideoTitle(videoId),
-					summary: `Error: ${error.message}`,
+					summary: errorMessage,
 					transcript: ''
 				});
 			}
@@ -722,10 +581,7 @@ ${transcript.split(/[.!?]\s+/)  // Split into sentences
 	}
 
 	onunload() {
-		// Restore original fetch
-		if (this.originalFetch) {
-			window.fetch = this.originalFetch;
-		}
+		// No need to restore fetch anymore
 		this.openai = undefined;
 	}
 
