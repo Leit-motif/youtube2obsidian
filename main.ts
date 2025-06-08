@@ -14,7 +14,7 @@ interface Youtube2ObsidianSettings {
 const DEFAULT_SETTINGS: Youtube2ObsidianSettings = {
 	openAIApiKey: '',
 	maxTokens: 500,
-	model: 'gpt-4o',
+	model: 'gpt-4o-mini',
 	summaryPrompt: 'Create a concise bullet-point summary of the following video transcript, highlighting the key points and main ideas:',
 	corsProxy: 'https://corsproxy.io/?',
 	transcriptFolder: 'YouTube Transcripts'
@@ -686,8 +686,10 @@ class Youtube2ObsidianSettingTab extends PluginSettingTab {
 			.setName('Model')
 			.setDesc('OpenAI model to use for summarization')
 			.addDropdown(dropdown => dropdown
-				.addOption('gpt-4o', 'GPT-4o (Fastest & Cost-effective)')
-				.addOption('gpt-3.5-turbo', 'GPT-3.5 Turbo (Most Economical)')
+				.addOption('gpt-4o-mini', 'GPT-4o Mini (Recommended)')
+				.addOption('gpt-4.1-nano', 'GPT-4.1 Nano (Most Cost-Effective)')
+				.addOption('gpt-4o', 'GPT-4o (Highest Quality)')
+				.addOption('gpt-3.5-turbo', 'GPT-3.5 Turbo (Legacy Economy)')
 				.setValue(this.plugin.settings.model)
 				.onChange(async (value) => {
 					this.plugin.settings.model = value;
