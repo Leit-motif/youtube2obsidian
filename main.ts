@@ -1,9 +1,12 @@
 import { App, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFolder } from 'obsidian';
 import OpenAI from 'openai';
 import { fetchTranscript } from 'youtube-transcript-plus';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 
 interface Youtube2ObsidianSettings {
 	openAIApiKey: string;
+	geminiApiKey: string;
+	apiProvider: 'openai' | 'gemini';
 	maxTokens: number;
 	model: string;
 	summaryPrompt: string;
@@ -13,6 +16,8 @@ interface Youtube2ObsidianSettings {
 
 const DEFAULT_SETTINGS: Youtube2ObsidianSettings = {
 	openAIApiKey: '',
+	geminiApiKey: '',
+	apiProvider: 'openai',
 	maxTokens: 500,
 	model: 'gpt-4o-mini',
 	summaryPrompt: 'Create a concise bullet-point summary of the following video transcript, highlighting the key points and main ideas:',
@@ -112,15 +117,21 @@ interface TranscriptItem {
 export default class Youtube2Obsidian extends Plugin {
 	settings: Youtube2ObsidianSettings;
 	openai: OpenAI | undefined;
+	gemini: GoogleGenerativeAI | undefined;
 
 	async onload() {
 		await this.loadSettings();
 
-		// Initialize OpenAI client
-		this.openai = new OpenAI({
-			apiKey: this.settings.openAIApiKey,
-			dangerouslyAllowBrowser: true
-		});
+		// Initialize clients
+		if (this.settings.openAIApiKey) {
+			this.openai = new OpenAI({
+				apiKey: this.settings.openAIApiKey,
+				dangerouslyAllowBrowser: true
+			});
+		}
+		if (this.settings.geminiApiKey) {
+			this.gemini = new GoogleGenerativeAI(this.settings.geminiApiKey);
+		}
 
 		// Add ribbon icon
 		this.addRibbonIcon(
@@ -224,7 +235,15 @@ export default class Youtube2Obsidian extends Plugin {
 				const cleanVideoId = videoId.replace(/[&?]t=.*$/, '').replace(/=+$/, '');
 				console.log(`Using cleaned video ID: ${cleanVideoId}`);
 
-				// First try to get the video title
+				if (this.settings.apiProvider === 'gemini') {
+					// Gemini can process the URL directly
+					const title = await this.getVideoTitle(cleanVideoId);
+					const summary = await this.summarizeWithGemini(cleanVideoId);
+					results.set(videoId, { title, summary, transcript: 'Transcript not fetched for Gemini API' });
+					continue; // Move to the next video
+				}
+
+				// Existing OpenAI flow
 				const title = await this.getVideoTitle(cleanVideoId);
 				console.log('Retrieved title for video:', title);
 				
@@ -285,9 +304,40 @@ export default class Youtube2Obsidian extends Plugin {
 		return results;
 	}
 
+	private async summarizeWithGemini(videoId: string): Promise<string> {
+		if (!this.gemini) {
+			throw new Error('Gemini client not initialized. Please set your API key in the settings.');
+		}
+	
+		try {
+			const model = this.gemini.getGenerativeModel({ model: "gemini-1.5-flash" });
+			const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
+	
+			const result = await model.generateContent([
+				this.settings.summaryPrompt,
+				{
+					fileData: {
+						mimeType: "video/youtube",
+						fileUri: youtubeUrl,
+					},
+				},
+			]);
+	
+			const response = result.response;
+			const summary = response.text();
+			return summary;
+		} catch (error) {
+			console.error('Error summarizing with Gemini:', error);
+			throw new Error(`Failed to summarize with Gemini: ${error instanceof Error ? error.message : 'Unknown error'}`);
+		}
+	}
+
 	private async summarizeTranscript(transcript: string): Promise<string> {
 		if (!this.openai) {
-			throw new Error('OpenAI client not initialized');
+			this.openai = new OpenAI({
+				apiKey: this.settings.openAIApiKey,
+				dangerouslyAllowBrowser: true
+			});
 		}
 
 		try {
@@ -596,11 +646,21 @@ ${transcript.split(/[.!?]\s+/)  // Split into sentences
 		console.log('Saving settings:', this.settings);
 		await this.saveData(this.settings);
 		
-		// Reinitialize OpenAI client with new settings
-		this.openai = new OpenAI({
-			apiKey: this.settings.openAIApiKey,
-			dangerouslyAllowBrowser: true
-		});
+		// Reinitialize clients with new settings
+		if (this.settings.openAIApiKey) {
+			this.openai = new OpenAI({
+				apiKey: this.settings.openAIApiKey,
+				dangerouslyAllowBrowser: true
+			});
+		} else {
+			this.openai = undefined;
+		}
+
+		if (this.settings.geminiApiKey) {
+			this.gemini = new GoogleGenerativeAI(this.settings.geminiApiKey);
+		} else {
+			this.gemini = undefined;
+		}
 	}
 
 	private async summarizeYouTubeVideos(editor: Editor) {
@@ -614,6 +674,16 @@ ${transcript.split(/[.!?]\s+/)  // Split into sentences
 
 		if (videoIds.length === 0) {
 			new Notice('No YouTube URLs found in the current note');
+			return;
+		}
+
+		if (this.settings.apiProvider === 'openai' && !this.settings.openAIApiKey) {
+			new Notice('Please set your OpenAI API key in the plugin settings');
+			return;
+		}
+
+		if (this.settings.apiProvider === 'gemini' && !this.settings.geminiApiKey) {
+			new Notice('Please set your Gemini API key in the plugin settings');
 			return;
 		}
 
@@ -647,15 +717,58 @@ class Youtube2ObsidianSettingTab extends PluginSettingTab {
 		containerEl.createEl('h2', { text: 'YouTube to Obsidian Settings' });
 
 		new Setting(containerEl)
+			.setName('API Provider')
+			.setDesc('Choose which AI provider to use for summarization.')
+			.addDropdown(dropdown => dropdown
+				.addOption('openai', 'OpenAI')
+				.addOption('gemini', 'Gemini')
+				.setValue(this.plugin.settings.apiProvider)
+				.onChange(async (value: 'openai' | 'gemini') => {
+					this.plugin.settings.apiProvider = value;
+					await this.plugin.saveSettings();
+					this.display(); // Refresh the settings tab to show/hide API key fields
+				}));
+		
+		const openAiKeySetting = new Setting(containerEl)
 			.setName('OpenAI API Key')
-			.setDesc('Your OpenAI API key for summarization (required)')
+			.setDesc('Enter your OpenAI API key')
 			.addText(text => text
-				.setPlaceholder('Enter your API key')
+				.setPlaceholder('sk-...')
 				.setValue(this.plugin.settings.openAIApiKey)
 				.onChange(async (value) => {
 					this.plugin.settings.openAIApiKey = value;
 					await this.plugin.saveSettings();
 				}));
+
+		const geminiKeySetting = new Setting(containerEl)
+			.setName('Gemini API Key')
+			.setDesc('Enter your Google AI Studio API key')
+			.addText(text => text
+				.setPlaceholder('...')
+				.setValue(this.plugin.settings.geminiApiKey)
+				.onChange(async (value) => {
+					this.plugin.settings.geminiApiKey = value;
+					await this.plugin.saveSettings();
+				}));
+		
+		// Show/hide API key fields based on provider
+		if (this.plugin.settings.apiProvider === 'openai') {
+			geminiKeySetting.settingEl.style.display = 'none';
+		} else {
+			openAiKeySetting.settingEl.style.display = 'none';
+		}
+
+		new Setting(containerEl)
+			.setName('Model')
+			.setDesc('Enter the model to use for summarization (e.g., gpt-4o-mini, gpt-4, gpt-3.5-turbo)')
+			.addText(text => text
+				.setPlaceholder('gpt-4o-mini')
+				.setValue(this.plugin.settings.model)
+				.onChange(async (value) => {
+					this.plugin.settings.model = value;
+					await this.plugin.saveSettings();
+				}))
+			.settingEl.style.display = this.plugin.settings.apiProvider === 'openai' ? 'flex' : 'none';
 
 		new Setting(containerEl)
 			.setName('Summary Prompt')
@@ -680,20 +793,6 @@ class Youtube2ObsidianSettingTab extends PluginSettingTab {
 						this.plugin.settings.maxTokens = numValue;
 						await this.plugin.saveSettings();
 					}
-				}));
-
-		new Setting(containerEl)
-			.setName('Model')
-			.setDesc('OpenAI model to use for summarization')
-			.addDropdown(dropdown => dropdown
-				.addOption('gpt-4o-mini', 'GPT-4o Mini (Recommended)')
-				.addOption('gpt-4.1-nano', 'GPT-4.1 Nano (Most Cost-Effective)')
-				.addOption('gpt-4o', 'GPT-4o (Highest Quality)')
-				.addOption('gpt-3.5-turbo', 'GPT-3.5 Turbo (Legacy Economy)')
-				.setValue(this.plugin.settings.model)
-				.onChange(async (value) => {
-					this.plugin.settings.model = value;
-					await this.plugin.saveSettings();
 				}));
 
 		new Setting(containerEl)

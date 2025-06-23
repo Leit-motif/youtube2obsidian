@@ -27,6 +27,7 @@
 		"typescript": "4.7.4"
 	},
 	"dependencies": {
+		"@google/generative-ai": "^0.24.1",
 		"openai": "^4.0.0",
 		"youtube-transcript-plus": "^1.0.4"
 	}
